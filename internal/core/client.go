@@ -103,12 +103,14 @@ func (p *AIClientPool) ExecuteWithFailover(providerName, prompt string, memory *
 		return fmt.Errorf("provider %s tidak memiliki API key aktif", providerName)
 	}
 
+	// 1. Periksa apakah prompt mereferensikan file lokal
 	enrichedPrompt := EnrichPromptWithFile(prompt)
+
+	// 2. Simpan pesan user ke memori lokal terlebih dahulu
+	memory.Save("user", enrichedPrompt)
 
 	cursor := p.cursors[providerName]
 	totalKeys := uint32(len(keys))
-
-	memory.Save("user", enrichedPrompt)
 
 	for i := uint32(0); i < totalKeys; i++ {
 		idx := (atomic.AddUint32(cursor, 1) - 1) % totalKeys
@@ -129,11 +131,10 @@ func (p *AIClientPool) ExecuteWithFailover(providerName, prompt string, memory *
 
 func dispatchAPI(providerType, apiKey string, memory *Memory, systemInstruction string) error {
 	startTime := time.Now()
-	prompt := memory.History[len(memory.History)-1].Content
 
 	switch providerType {
 	case "gemini":
-		return callGemini(apiKey, prompt, startTime, memory, systemInstruction)
+		return callGemini(apiKey, startTime, memory, systemInstruction)
 	case "deepseek", "openai":
 		baseURL := "https://api.deepseek.com/chat/completions"
 		model := "deepseek-chat"
@@ -141,11 +142,11 @@ func dispatchAPI(providerType, apiKey string, memory *Memory, systemInstruction 
 			baseURL = "https://api.openai.com/v1/chat/completions"
 			model = "gpt-4o"
 		}
-		return callOpenAICompatible(baseURL, apiKey, model, prompt, startTime, memory, systemInstruction)
+		return callOpenAICompatible(baseURL, apiKey, model, startTime, memory, systemInstruction)
 	case "anthropic", "claude":
-		return callClaude(apiKey, prompt, startTime, memory, systemInstruction)
+		return callClaude(apiKey, startTime, memory, systemInstruction)
 	default:
-		return callGemini(apiKey, prompt, startTime, memory, systemInstruction)
+		return callGemini(apiKey, startTime, memory, systemInstruction)
 	}
 }
 
@@ -172,15 +173,24 @@ func printMetrics(providerName string, startTime time.Time, promptTokens, comple
 	fmt.Println("=========================================")
 }
 
-func callGemini(apiKey, prompt string, startTime time.Time, memory *Memory, systemInstruction string) error {
+// **Sinkronisasi Penuh Riwayat Memori untuk Gemini**
+func callGemini(apiKey string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=%s", apiKey)
 	
+	contents := []any{}
+	for _, msg := range memory.History {
+		role := "user"
+		if msg.Role == "model" || msg.Role == "assistant" {
+			role = "model"
+		}
+		contents = append(contents, map[string]any{
+			"role": role,
+			"parts": []any{map[string]any{"text": msg.Content}},
+		})
+	}
+
 	payload := map[string]any{
-		"contents": []any{
-			map[string]any{
-				"parts": []any{map[string]any{"text": prompt}},
-			},
-		},
+		"contents": contents,
 	}
 	if systemInstruction != "" {
 		payload["system_instruction"] = map[string]any{
@@ -220,6 +230,7 @@ func callGemini(apiKey, prompt string, startTime time.Time, memory *Memory, syst
 		fmt.Println(responseText)
 		fmt.Println("-------------------")
 		
+		// Simpan respons model ke memori lokal
 		memory.Save("model", responseText)
 		printMetrics("gemini-3.6-flash", startTime, result.UsageMetadata.PromptTokenCount, result.UsageMetadata.CandidatesTokenCount, resp.Header)
 		return nil
@@ -227,12 +238,20 @@ func callGemini(apiKey, prompt string, startTime time.Time, memory *Memory, syst
 	return fmt.Errorf("respon kosong")
 }
 
-func callOpenAICompatible(url, apiKey, model, prompt string, startTime time.Time, memory *Memory, systemInstruction string) error {
+// **Sinkronisasi Penuh Riwayat Memori untuk OpenAI & DeepSeek**
+func callOpenAICompatible(url, apiKey, model string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	messages := []any{}
 	if systemInstruction != "" {
 		messages = append(messages, map[string]string{"role": "system", "content": systemInstruction})
 	}
-	messages = append(messages, map[string]string{"role": "user", "content": prompt})
+
+	for _, msg := range memory.History {
+		role := msg.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		messages = append(messages, map[string]string{"role": role, "content": msg.Content})
+	}
 
 	payload := map[string]any{
 		"model":    model,
@@ -279,14 +298,23 @@ func callOpenAICompatible(url, apiKey, model, prompt string, startTime time.Time
 	return fmt.Errorf("respon kosong")
 }
 
-func callClaude(apiKey, prompt string, startTime time.Time, memory *Memory, systemInstruction string) error {
+// **Sinkronisasi Penuh Riwayat Memori untuk Claude (Anthropic)**
+func callClaude(apiKey string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	url := "https://api.anthropic.com/v1/messages"
+	
+	messages := []any{}
+	for _, msg := range memory.History {
+		role := msg.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		messages = append(messages, map[string]string{"role": role, "content": msg.Content})
+	}
+
 	payload := map[string]any{
 		"model":      "claude-3-5-sonnet-20241022",
 		"max_tokens": 8192,
-		"messages": []any{
-			map[string]string{"role": "user", "content": prompt},
-		},
+		"messages":   messages,
 	}
 	if systemInstruction != "" {
 		payload["system"] = systemInstruction
