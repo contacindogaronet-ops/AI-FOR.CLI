@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -36,7 +37,48 @@ func InitPool(cfg *config.Config) *AIClientPool {
 	return pool
 }
 
-// Auto-detect dan baca file lokal jika disebutkan dalam prompt
+// Validasi apakah file adalah teks/kode sumber murni (bukan binary/executable)
+func isTextFile(filename string) bool {
+	// Abaikan file biner, binary output, atau file tersembunyi/sistem
+	base := filepath.Base(filename)
+	if base == "aicli" || strings.HasPrefix(base, ".") || strings.HasSuffix(base, ".bin") || strings.HasSuffix(base, ".exe") {
+		return false
+	}
+
+	// Cek ekstensi umum teks/kode
+	allowedExts := map[string]bool{
+		".sh": true, ".go": true, ".py": true, ".js": true, ".ts": true,
+		".json": true, ".yaml": true, ".yml": true, ".txt": true, ".md": true,
+		".rs": true, ".c": true, ".cpp": true, ".h": true, ".html": true, ".css": true,
+	}
+	
+	ext := strings.ToLower(filepath.Ext(filename))
+	if allowedExts[ext] {
+		return true
+	}
+
+	// Fallback: Inspeksi buffer awal untuk mendeteksi keberadaan null bytes (ciri file biner)
+	f, err := os.Open(filename)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 512)
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return false
+	}
+
+	for i := 0; i < n; i++ {
+		if buf[i] == 0 {
+			return false // Mengandung byte null, pastikan ini file biner
+		}
+	}
+
+	return true
+}
+
 func EnrichPromptWithFile(prompt string) string {
 	words := strings.Fields(prompt)
 	for _, word := range words {
@@ -45,10 +87,14 @@ func EnrichPromptWithFile(prompt string) string {
 			continue
 		}
 		if info, err := os.Stat(cleaned); err == nil && !info.IsDir() {
-			data, err := os.ReadFile(cleaned)
-			if err == nil {
-				log.Info().Str("file", cleaned).Msg("Berhasil membaca file lokal Termux")
-				return fmt.Sprintf("%s\n\n--- KONTEN FILE [%s] ---\n%s", prompt, cleaned, string(data))
+			if isTextFile(cleaned) {
+				data, err := os.ReadFile(cleaned)
+				if err == nil {
+					log.Info().Str("file", cleaned).Msg("Berhasil membaca file teks/skrip lokal Termux")
+					return fmt.Sprintf("%s\n\n--- KONTEN FILE [%s] ---\n%s", prompt, cleaned, string(data))
+				}
+			} else {
+				log.Warn().Str("file", cleaned).Msg("File diabaikan karena terdeteksi sebagai biner/eksekusi")
 			}
 		}
 	}
@@ -61,7 +107,6 @@ func (p *AIClientPool) ExecuteWithFailover(providerName, prompt string, memory *
 		return fmt.Errorf("provider %s tidak memiliki API key aktif", providerName)
 	}
 
-	// Otomatis inject isi file jika ada file yang direferensikan di prompt
 	enrichedPrompt := EnrichPromptWithFile(prompt)
 
 	cursor := p.cursors[providerName]
