@@ -1,3 +1,4 @@
+// internal/config/config.go
 package config
 
 import (
@@ -17,9 +18,22 @@ type ProviderConfig struct {
 	APIKeys []string `yaml:"api_keys"`
 }
 
+func GetTermuxHome() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
+	return "/data/data/com.termux/files/home"
+}
+
+func GetTermuxPrefix() string {
+	if prefix := os.Getenv("PREFIX"); prefix != "" {
+		return prefix
+	}
+	return "/data/data/com.termux/files/usr"
+}
+
 func GetConfigPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "aicli", "config.yaml")
+	return filepath.Join(GetTermuxHome(), ".config", "aicli", "config.yaml")
 }
 
 func LoadConfig() (*Config, error) {

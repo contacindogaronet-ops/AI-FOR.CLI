@@ -1,13 +1,15 @@
+// internal/core/memory.go
 package core
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"aicli/internal/config"
 )
 
 type Message struct {
-	Role    string `json:"role"` // "user" atau "model"
+	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
@@ -16,8 +18,7 @@ type Memory struct {
 }
 
 func getMemoryPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "aicli", "memory.json")
+	return filepath.Join(config.GetTermuxHome(), ".config", "aicli", "memory.json")
 }
 
 func LoadMemory() *Memory {
@@ -35,7 +36,6 @@ func LoadMemory() *Memory {
 
 func (m *Memory) Save(role, content string) {
 	m.History = append(m.History, Message{Role: role, Content: content})
-	// Batasi memori maksimal 20 riwayat terakhir agar tidak bloat
 	if len(m.History) > 20 {
 		m.History = m.History[len(m.History)-20:]
 	}
