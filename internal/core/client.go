@@ -19,12 +19,14 @@ import (
 type AIClientPool struct {
 	providers map[string][]string
 	cursors   map[string]*uint32
+	config    *config.Config
 }
 
 func InitPool(cfg *config.Config) *AIClientPool {
 	pool := &AIClientPool{
 		providers: make(map[string][]string),
 		cursors:   make(map[string]*uint32),
+		config:    cfg,
 	}
 
 	for _, p := range cfg.Providers {
@@ -37,15 +39,12 @@ func InitPool(cfg *config.Config) *AIClientPool {
 	return pool
 }
 
-// Validasi apakah file adalah teks/kode sumber murni (bukan binary/executable)
 func isTextFile(filename string) bool {
-	// Abaikan file biner, binary output, atau file tersembunyi/sistem
 	base := filepath.Base(filename)
 	if base == "aicli" || strings.HasPrefix(base, ".") || strings.HasSuffix(base, ".bin") || strings.HasSuffix(base, ".exe") {
 		return false
 	}
 
-	// Cek ekstensi umum teks/kode
 	allowedExts := map[string]bool{
 		".sh": true, ".go": true, ".py": true, ".js": true, ".ts": true,
 		".json": true, ".yaml": true, ".yml": true, ".txt": true, ".md": true,
@@ -57,7 +56,6 @@ func isTextFile(filename string) bool {
 		return true
 	}
 
-	// Fallback: Inspeksi buffer awal untuk mendeteksi keberadaan null bytes (ciri file biner)
 	f, err := os.Open(filename)
 	if err != nil {
 		return false
@@ -72,7 +70,7 @@ func isTextFile(filename string) bool {
 
 	for i := 0; i < n; i++ {
 		if buf[i] == 0 {
-			return false // Mengandung byte null, pastikan ini file biner
+			return false
 		}
 	}
 
@@ -93,8 +91,6 @@ func EnrichPromptWithFile(prompt string) string {
 					log.Info().Str("file", cleaned).Msg("Berhasil membaca file teks/skrip lokal Termux")
 					return fmt.Sprintf("%s\n\n--- KONTEN FILE [%s] ---\n%s", prompt, cleaned, string(data))
 				}
-			} else {
-				log.Warn().Str("file", cleaned).Msg("File diabaikan karena terdeteksi sebagai biner/eksekusi")
 			}
 		}
 	}
@@ -120,7 +116,7 @@ func (p *AIClientPool) ExecuteWithFailover(providerName, prompt string, memory *
 
 		log.Info().Str("provider", providerName).Int("key_index", int(idx)).Msg("Mencoba eksekusi API...")
 
-		err := dispatchAPI(providerName, currentKey, memory)
+		err := dispatchAPI(providerName, currentKey, memory, p.config.SystemInstruction)
 		if err == nil {
 			return nil
 		}
@@ -131,13 +127,13 @@ func (p *AIClientPool) ExecuteWithFailover(providerName, prompt string, memory *
 	return fmt.Errorf("semua key pada provider %s gagal diproses", providerName)
 }
 
-func dispatchAPI(providerType, apiKey string, memory *Memory) error {
+func dispatchAPI(providerType, apiKey string, memory *Memory, systemInstruction string) error {
 	startTime := time.Now()
 	prompt := memory.History[len(memory.History)-1].Content
 
 	switch providerType {
 	case "gemini":
-		return callGemini(apiKey, prompt, startTime, memory)
+		return callGemini(apiKey, prompt, startTime, memory, systemInstruction)
 	case "deepseek", "openai":
 		baseURL := "https://api.deepseek.com/chat/completions"
 		model := "deepseek-chat"
@@ -145,11 +141,11 @@ func dispatchAPI(providerType, apiKey string, memory *Memory) error {
 			baseURL = "https://api.openai.com/v1/chat/completions"
 			model = "gpt-4o"
 		}
-		return callOpenAICompatible(baseURL, apiKey, model, prompt, startTime, memory)
+		return callOpenAICompatible(baseURL, apiKey, model, prompt, startTime, memory, systemInstruction)
 	case "anthropic", "claude":
-		return callClaude(apiKey, prompt, startTime, memory)
+		return callClaude(apiKey, prompt, startTime, memory, systemInstruction)
 	default:
-		return callGemini(apiKey, prompt, startTime, memory)
+		return callGemini(apiKey, prompt, startTime, memory, systemInstruction)
 	}
 }
 
@@ -176,8 +172,9 @@ func printMetrics(providerName string, startTime time.Time, promptTokens, comple
 	fmt.Println("=========================================")
 }
 
-func callGemini(apiKey, prompt string, startTime time.Time, memory *Memory) error {
+func callGemini(apiKey, prompt string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=%s", apiKey)
+	
 	payload := map[string]any{
 		"contents": []any{
 			map[string]any{
@@ -185,6 +182,12 @@ func callGemini(apiKey, prompt string, startTime time.Time, memory *Memory) erro
 			},
 		},
 	}
+	if systemInstruction != "" {
+		payload["system_instruction"] = map[string]any{
+			"parts": []any{map[string]any{"text": systemInstruction}},
+		}
+	}
+
 	body, _ := json.Marshal(payload)
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
@@ -224,12 +227,16 @@ func callGemini(apiKey, prompt string, startTime time.Time, memory *Memory) erro
 	return fmt.Errorf("respon kosong")
 }
 
-func callOpenAICompatible(url, apiKey, model, prompt string, startTime time.Time, memory *Memory) error {
+func callOpenAICompatible(url, apiKey, model, prompt string, startTime time.Time, memory *Memory, systemInstruction string) error {
+	messages := []any{}
+	if systemInstruction != "" {
+		messages = append(messages, map[string]string{"role": "system", "content": systemInstruction})
+	}
+	messages = append(messages, map[string]string{"role": "user", "content": prompt})
+
 	payload := map[string]any{
-		"model": model,
-		"messages": []any{
-			map[string]string{"role": "user", "content": prompt},
-		},
+		"model":    model,
+		"messages": messages,
 	}
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
@@ -272,7 +279,7 @@ func callOpenAICompatible(url, apiKey, model, prompt string, startTime time.Time
 	return fmt.Errorf("respon kosong")
 }
 
-func callClaude(apiKey, prompt string, startTime time.Time, memory *Memory) error {
+func callClaude(apiKey, prompt string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	url := "https://api.anthropic.com/v1/messages"
 	payload := map[string]any{
 		"model":      "claude-3-5-sonnet-20241022",
@@ -281,6 +288,10 @@ func callClaude(apiKey, prompt string, startTime time.Time, memory *Memory) erro
 			map[string]string{"role": "user", "content": prompt},
 		},
 	}
+	if systemInstruction != "" {
+		payload["system"] = systemInstruction
+	}
+
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")

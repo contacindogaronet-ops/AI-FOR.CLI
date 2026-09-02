@@ -1,4 +1,3 @@
-// internal/config/config.go
 package config
 
 import (
@@ -8,8 +7,9 @@ import (
 )
 
 type Config struct {
-	DefaultModel string           `yaml:"default_model"`
-	Providers    []ProviderConfig `yaml:"providers"`
+	DefaultModel      string           `yaml:"default_model"`
+	SystemInstruction string           `yaml:"system_instruction"`
+	Providers         []ProviderConfig `yaml:"providers"`
 }
 
 type ProviderConfig struct {
@@ -25,27 +25,28 @@ func GetTermuxHome() string {
 	return "/data/data/com.termux/files/home"
 }
 
-func GetTermuxPrefix() string {
-	if prefix := os.Getenv("PREFIX"); prefix != "" {
-		return prefix
-	}
-	return "/data/data/com.termux/files/usr"
-}
-
 func GetConfigPath() string {
 	return filepath.Join(GetTermuxHome(), ".config", "aicli", "config.yaml")
 }
 
+func GetRulesPath() string {
+	return filepath.Join(GetTermuxHome(), ".config", "aicli", "rules.yaml")
+}
+
 func LoadConfig() (*Config, error) {
 	configPath := GetConfigPath()
+	rulesPath := GetRulesPath()
+
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		defaultCfg := Config{
-			DefaultModel: "gemini",
+			DefaultModel:      "gemini",
+			SystemInstruction: "Aktifkan mode JARGO Lead Software Architect & Developer. Senior System Architect & Full-Stack Engineer mindset. Zero-Alloc, Clean Code, SOLID, DRY, KISS.",
 			Providers: []ProviderConfig{
 				{Name: "gemini", Type: "gemini", APIKeys: []string{}},
 			},
 		}
 		_ = SaveConfig(&defaultCfg)
+		_ = os.WriteFile(rulesPath, []byte("system_instruction: \""+defaultCfg.SystemInstruction+"\"\n"), 0644)
 		return &defaultCfg, nil
 	}
 
@@ -60,6 +61,17 @@ func LoadConfig() (*Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, err
 	}
+
+	// Muat aturan tambahan dari rules.yaml jika tersedia
+	if data, err := os.ReadFile(rulesPath); err == nil {
+		var ruleStruct struct {
+			SystemInstruction string `yaml:"system_instruction"`
+		}
+		if yaml.Unmarshal(data, &ruleStruct) == nil && ruleStruct.SystemInstruction != "" {
+			cfg.SystemInstruction = ruleStruct.SystemInstruction
+		}
+	}
+
 	return &cfg, nil
 }
 
