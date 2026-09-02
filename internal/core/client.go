@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -34,16 +36,38 @@ func InitPool(cfg *config.Config) *AIClientPool {
 	return pool
 }
 
+// Auto-detect dan baca file lokal jika disebutkan dalam prompt
+func EnrichPromptWithFile(prompt string) string {
+	words := strings.Fields(prompt)
+	for _, word := range words {
+		cleaned := strings.Trim(word, ",'\"`?()[]{}")
+		if cleaned == "" {
+			continue
+		}
+		if info, err := os.Stat(cleaned); err == nil && !info.IsDir() {
+			data, err := os.ReadFile(cleaned)
+			if err == nil {
+				log.Info().Str("file", cleaned).Msg("Berhasil membaca file lokal Termux")
+				return fmt.Sprintf("%s\n\n--- KONTEN FILE [%s] ---\n%s", prompt, cleaned, string(data))
+			}
+		}
+	}
+	return prompt
+}
+
 func (p *AIClientPool) ExecuteWithFailover(providerName, prompt string, memory *Memory) error {
 	keys, exists := p.providers[providerName]
 	if !exists || len(keys) == 0 {
 		return fmt.Errorf("provider %s tidak memiliki API key aktif", providerName)
 	}
 
+	// Otomatis inject isi file jika ada file yang direferensikan di prompt
+	enrichedPrompt := EnrichPromptWithFile(prompt)
+
 	cursor := p.cursors[providerName]
 	totalKeys := uint32(len(keys))
 
-	memory.Save("user", prompt)
+	memory.Save("user", enrichedPrompt)
 
 	for i := uint32(0); i < totalKeys; i++ {
 		idx := (atomic.AddUint32(cursor, 1) - 1) % totalKeys
