@@ -22,6 +22,14 @@ type AIClientPool struct {
 	config    *config.Config
 }
 
+type ProviderHealth struct {
+	Provider string
+	KeyIndex int
+	KeyMask  string
+	Status   string // "ONLINE" / "OFFLINE"
+	Reason   string
+}
+
 func InitPool(cfg *config.Config) *AIClientPool {
 	pool := &AIClientPool{
 		providers: make(map[string][]string),
@@ -37,6 +45,110 @@ func InitPool(cfg *config.Config) *AIClientPool {
 		}
 	}
 	return pool
+}
+
+func maskKey(k string) string {
+	if len(k) <= 8 {
+		return "****"
+	}
+	return k[:4] + "..." + k[len(k)-4:]
+}
+
+// PingAllProviders menguji seluruh API Key pada semua provider aktif
+func (p *AIClientPool) PingAllProviders() []ProviderHealth {
+	var results []ProviderHealth
+	for name, keys := range p.providers {
+		for idx, key := range keys {
+			err := testSingleKey(name, key)
+			status := "ONLINE"
+			reason := "OK"
+			if err != nil {
+				status = "OFFLINE"
+				reason = err.Error()
+			}
+			results = append(results, ProviderHealth{
+				Provider: name,
+				KeyIndex: idx,
+				KeyMask:  maskKey(key),
+				Status:   status,
+				Reason:   reason,
+			})
+		}
+	}
+	return results
+}
+
+func testSingleKey(providerType, apiKey string) error {
+	switch providerType {
+	case "gemini":
+		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=%s", apiKey)
+		payload := map[string]any{
+			"contents": []any{map[string]any{"parts": []any{map[string]any{"text": "ping"}}}},
+		}
+		body, _ := json.Marshal(payload)
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		}
+		return nil
+	case "deepseek", "openai":
+		baseURL := "https://api.deepseek.com/chat/completions"
+		model := "deepseek-chat"
+		if providerType == "openai" {
+			baseURL = "https://api.openai.com/v1/chat/completions"
+			model = "gpt-4o"
+		}
+		payload := map[string]any{
+			"model":      model,
+			"messages":   []any{map[string]string{"role": "user", "content": "ping"}},
+			"max_tokens": 5,
+		}
+		body, _ := json.Marshal(payload)
+		req, _ := http.NewRequest("POST", baseURL, bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		}
+		return nil
+	case "anthropic", "claude":
+		url := "https://api.anthropic.com/v1/messages"
+		payload := map[string]any{
+			"model":      "claude-3-5-sonnet-20241022",
+			"max_tokens": 5,
+			"messages":   []any{map[string]string{"role": "user", "content": "ping"}},
+		}
+		body, _ := json.Marshal(payload)
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown provider type")
+	}
 }
 
 func isTextFile(filename string) bool {
@@ -103,10 +215,7 @@ func (p *AIClientPool) ExecuteWithFailover(providerName, prompt string, memory *
 		return fmt.Errorf("provider %s tidak memiliki API key aktif", providerName)
 	}
 
-	// 1. Periksa apakah prompt mereferensikan file lokal
 	enrichedPrompt := EnrichPromptWithFile(prompt)
-
-	// 2. Simpan pesan user ke memori lokal terlebih dahulu
 	memory.Save("user", enrichedPrompt)
 
 	cursor := p.cursors[providerName]
@@ -173,7 +282,6 @@ func printMetrics(providerName string, startTime time.Time, promptTokens, comple
 	fmt.Println("=========================================")
 }
 
-// **Sinkronisasi Penuh Riwayat Memori untuk Gemini**
 func callGemini(apiKey string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=%s", apiKey)
 	
@@ -230,7 +338,6 @@ func callGemini(apiKey string, startTime time.Time, memory *Memory, systemInstru
 		fmt.Println(responseText)
 		fmt.Println("-------------------")
 		
-		// Simpan respons model ke memori lokal
 		memory.Save("model", responseText)
 		printMetrics("gemini-3.6-flash", startTime, result.UsageMetadata.PromptTokenCount, result.UsageMetadata.CandidatesTokenCount, resp.Header)
 		return nil
@@ -238,7 +345,6 @@ func callGemini(apiKey string, startTime time.Time, memory *Memory, systemInstru
 	return fmt.Errorf("respon kosong")
 }
 
-// **Sinkronisasi Penuh Riwayat Memori untuk OpenAI & DeepSeek**
 func callOpenAICompatible(url, apiKey, model string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	messages := []any{}
 	if systemInstruction != "" {
@@ -298,7 +404,6 @@ func callOpenAICompatible(url, apiKey, model string, startTime time.Time, memory
 	return fmt.Errorf("respon kosong")
 }
 
-// **Sinkronisasi Penuh Riwayat Memori untuk Claude (Anthropic)**
 func callClaude(apiKey string, startTime time.Time, memory *Memory, systemInstruction string) error {
 	url := "https://api.anthropic.com/v1/messages"
 	

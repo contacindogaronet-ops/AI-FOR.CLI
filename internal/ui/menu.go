@@ -10,178 +10,134 @@ import (
 	"aicli/internal/core"
 )
 
+// RunInteractiveMenu adalah fungsi utama yang dipanggil oleh main.go
 func RunInteractiveMenu(cfg *config.Config, pool *core.AIClientPool, memory *core.Memory) {
-	reader := bufio.NewReader(os.Stdin)
-	currentModel := cfg.DefaultModel
+	StartUIWithPool(cfg, pool, memory)
+}
+
+func StartUI(cfg *config.Config) {
+	pool := core.InitPool(cfg)
+	memory := core.LoadMemory()
+	StartUIWithPool(cfg, pool, memory)
+}
+
+func StartUIWithPool(cfg *config.Config, pool *core.AIClientPool, memory *core.Memory) {
+	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
-		fmt.Println("\n=========================================")
-		fmt.Println("       AI MULTI-PROVIDER CLI ENGINE      ")
-		fmt.Println("=========================================")
-		fmt.Printf("Model/Provider Aktif : [%s]\n", currentModel)
+		fmt.Println("\n========================================")
+		fmt.Println("      AI MULTI-PROVIDER CLI ENGINE      ")
+		fmt.Println("========================================")
+		fmt.Printf("Model/Provider Aktif : [%s]\n", cfg.DefaultModel)
 		fmt.Printf("Memori Sesi Aktif    : %d pesan tercatat\n", len(memory.History))
-		fmt.Println("-----------------------------------------")
+		fmt.Println("----------------------------------------")
 		fmt.Println("[1] Kirim Prompt / Chat")
 		fmt.Println("[2] Kelola API Keys (Tambah / Hapus)")
 		fmt.Println("[3] Ganti Provider Aktif")
 		fmt.Println("[4] Bersihkan Memori Otak (Reset Context)")
+		fmt.Println("[5] Diagnosa Otomatis Sistem HP & Termux")
+		fmt.Println("[6] Ping & Cek Status Kesehatan Semua API Key")
 		fmt.Println("[q] Keluar")
-		fmt.Println("-----------------------------------------")
-		fmt.Print("Pilih menu [1-4/q]: ")
+		fmt.Println("----------------------------------------")
+		fmt.Print("Pilih menu [1-6/q]: ")
 
-		input, err := reader.ReadString('\n')
-		if err != nil {
+		if !scanner.Scan() {
 			break
 		}
-		choice := strings.TrimSpace(input)
+		choice := strings.TrimSpace(scanner.Text())
 
 		switch choice {
 		case "1":
-			fmt.Print("\nMasukkan prompt kamu: ")
-			pInput, _ := reader.ReadString('\n')
-			prompt := strings.TrimSpace(pInput)
-			if prompt == "" {
-				fmt.Println("Prompt tidak boleh kosong!")
-				continue
-			}
-
-			fmt.Printf("\n[Mengirim dengan provider: %s]...\n", currentModel)
-			err = pool.ExecuteWithFailover(currentModel, prompt, memory)
-			if err != nil {
-				fmt.Printf("Error: %v\n", err)
-			}
-
-		case "2":
-			manageAPIKeysMenu(cfg, pool, reader)
-
-		case "3":
-			fmt.Println("\nDaftar Provider Tersedia:")
-			for idx, p := range cfg.Providers {
-				fmt.Printf("[%d] %s (%d API Keys terdaftar)\n", idx+1, p.Name, len(p.APIKeys))
-			}
-			fmt.Print("Pilih nama provider: ")
-			mInput, _ := reader.ReadString('\n')
-			target := strings.TrimSpace(mInput)
-			
-			found := false
-			for _, p := range cfg.Providers {
-				if p.Name == target {
-					currentModel = p.Name
-					found = true
-					fmt.Printf("-> Berhasil beralih ke provider: %s\n", currentModel)
-					break
+			fmt.Print("Masukkan prompt kamu: ")
+			if scanner.Scan() {
+				prompt := strings.TrimSpace(scanner.Text())
+				if prompt != "" {
+					fmt.Printf("\n[Mengirim dengan provider: %s]...\n", cfg.DefaultModel)
+					err := pool.ExecuteWithFailover(cfg.DefaultModel, prompt, memory)
+					if err != nil {
+						fmt.Printf("[Error] Gagal mengeksekusi request: %v\n", err)
+					}
 				}
 			}
-			if !found {
-				fmt.Println("-> Provider tidak valid!")
+		case "2":
+			fmt.Println("\n[Kelola API Keys]")
+			fmt.Print("Masukkan nama provider (gemini/deepseek/openai/claude): ")
+			if scanner.Scan() {
+				pName := strings.TrimSpace(scanner.Text())
+				fmt.Print("Masukkan API Key baru: ")
+				if scanner.Scan() {
+					apiKey := strings.TrimSpace(scanner.Text())
+					if pName != "" && apiKey != "" {
+						found := false
+						for i := range cfg.Providers {
+							if cfg.Providers[i].Name == pName {
+								cfg.Providers[i].APIKeys = append(cfg.Providers[i].APIKeys, apiKey)
+								found = true
+								break
+							}
+						}
+						if !found {
+							cfg.Providers = append(cfg.Providers, config.ProviderConfig{
+								Name:    pName,
+								Type:    pName,
+								APIKeys: []string{apiKey},
+							})
+						}
+						_ = config.SaveConfig(cfg)
+						pool = core.InitPool(cfg)
+						fmt.Println("[Sukses] API Key berhasil ditambahkan dan disimpan.")
+					}
+				}
 			}
-
+		case "3":
+			fmt.Print("Masukkan nama provider baru (gemini/deepseek/openai/claude): ")
+			if scanner.Scan() {
+				newModel := strings.TrimSpace(scanner.Text())
+				if newModel != "" {
+					cfg.DefaultModel = newModel
+					_ = config.SaveConfig(cfg)
+					fmt.Printf("[Sukses] Provider aktif diubah ke: %s\n", newModel)
+				}
+			}
 		case "4":
 			memory.Clear()
-			fmt.Println("-> Memori otak berhasil dibersihkan (Reset sesi baru).")
+			fmt.Println("[Sukses] Memori otak berhasil dibersihkan.")
+		case "5":
+			fmt.Println("\n[DIAGNOSA OTOMATIS SISTEM HP & TERMUX]")
+			ramInfo := core.RunSystemDiagnostics("free -h")
+			diskInfo := core.RunSystemDiagnostics("df -h")
+			procInfo := core.RunSystemDiagnostics("ps aux | head -n 15")
 
-		case "q", "exit":
-			fmt.Println("Keluar dari program...")
+			diagnosticSummary := fmt.Sprintf("--- RAM INFO ---\n%s\n\n--- DISK STORAGE ---\n%s\n\n--- TOP PROCESSES ---\n%s", ramInfo, diskInfo, procInfo)
+			fmt.Println(diagnosticSummary)
+
+			prompt := "Analisis kondisi sistem HP dan Termux saya berdasarkan data diagnostik ini, berikan rekomendasi optimasi:\n" + diagnosticSummary
+			fmt.Printf("\n[Mengirim data diagnosa ke AI: %s]...\n", cfg.DefaultModel)
+			err := pool.ExecuteWithFailover(cfg.DefaultModel, prompt, memory)
+			if err != nil {
+				fmt.Printf("[Error] Gagal menganalisis sistem: %v\n", err)
+			}
+		case "6":
+			fmt.Println("\n[PULSE CHECK / PING KESEHATAN SELURUH API KEY]...")
+			healthStatuses := pool.PingAllProviders()
+			fmt.Println("\n========================================================")
+			fmt.Println(" PROVIDER   | KEY INDEX | KEY MASK   | STATUS   | DETAIL")
+			fmt.Println("--------------------------------------------------------")
+			for _, h := range healthStatuses {
+				statusColored := h.Status
+				if h.Status == "ONLINE" {
+					statusColored = "[ONLINE]"
+				} else {
+					statusColored = "[OFFLINE]"
+				}
+				fmt.Printf(" %-10s | [%-9d] | %-10s | %-8s | %s\n", h.Provider, h.KeyIndex, h.KeyMask, statusColored, h.Reason)
+			}
+			fmt.Println("========================================================")
+		case "q":
+			fmt.Println("Keluar dari program. Sampai jumpa!")
 			return
-
 		default:
-			fmt.Println("Pilihan tidak valid.")
-		}
-	}
-}
-
-func manageAPIKeysMenu(cfg *config.Config, pool *core.AIClientPool, reader *bufio.Reader) {
-	for {
-		fmt.Println("\n--- KELOLA API KEYS ---")
-		for idx, p := range cfg.Providers {
-			fmt.Printf("[%d] Provider: %s (Total Key: %d)\n", idx+1, p.Name, len(p.APIKeys))
-			for kidx, k := range p.APIKeys {
-				masked := k
-				if len(k) > 10 {
-					masked = k[:6] + "..." + k[len(k)-4:]
-				}
-				fmt.Printf("    - [%d.%d] %s\n", idx+1, kidx+1, masked)
-			}
-		}
-		fmt.Println("-----------------------------------------")
-		fmt.Println("[1] Tambah API Key")
-		fmt.Println("[2] Hapus API Key")
-		fmt.Println("[b] Kembali ke Menu Utama")
-		fmt.Print("Pilih [1/2/b]: ")
-
-		input, _ := reader.ReadString('\n')
-		opt := strings.TrimSpace(input)
-
-		if opt == "b" || opt == "B" {
-			break
-		}
-
-		if opt == "1" {
-			fmt.Print("Masukkan nama provider (gemini/deepseek/claude/gpt): ")
-			pName, _ := reader.ReadString('\n')
-			pName = strings.TrimSpace(pName)
-
-			fmt.Print("Masukkan string API Key baru: ")
-			newKey, _ := reader.ReadString('\n')
-			newKey = strings.TrimSpace(newKey)
-
-			if newKey == "" {
-				fmt.Println("API Key kosong!")
-				continue
-			}
-
-			updated := false
-			for i := range cfg.Providers {
-				if cfg.Providers[i].Name == pName {
-					cfg.Providers[i].APIKeys = append(cfg.Providers[i].APIKeys, newKey)
-					updated = true
-					break
-				}
-			}
-
-			if !updated {
-				cfg.Providers = append(cfg.Providers, config.ProviderConfig{
-					Name:    pName,
-					Type:    pName,
-					APIKeys: []string{newKey},
-				})
-			}
-
-			_ = config.SaveConfig(cfg)
-			*pool = *core.InitPool(cfg)
-			fmt.Println("-> API Key berhasil ditambahkan dan disimpan!")
-
-		} else if opt == "2" {
-			fmt.Print("Masukkan nama provider yang ingin dihapus key-nya: ")
-			pName, _ := reader.ReadString('\n')
-			pName = strings.TrimSpace(pName)
-
-			for i := range cfg.Providers {
-				if cfg.Providers[i].Name == pName {
-					if len(cfg.Providers[i].APIKeys) == 0 {
-						fmt.Println("Tidak ada key di provider ini.")
-						break
-					}
-					for kidx, k := range cfg.Providers[i].APIKeys {
-						fmt.Printf("[%d] %s\n", kidx+1, k)
-					}
-					fmt.Print("Pilih nomor index key yang akan dihapus: ")
-					var kidx int
-					_, err := fmt.Scanf("%d", &kidx)
-					_, _ = reader.ReadString('\n')
-
-					if err == nil && kidx >= 1 && kidx <= len(cfg.Providers[i].APIKeys) {
-						idxToRemove := kidx - 1
-						cfg.Providers[i].APIKeys = append(cfg.Providers[i].APIKeys[:idxToRemove], cfg.Providers[i].APIKeys[idxToRemove+1:]...)
-						_ = config.SaveConfig(cfg)
-						*pool = *core.InitPool(cfg)
-						fmt.Println("-> API Key berhasil dihapus!")
-					} else {
-						fmt.Println("Index key tidak valid!")
-					}
-					break
-				}
-			}
+			fmt.Println("[Error] Pilihan tidak valid.")
 		}
 	}
 }
