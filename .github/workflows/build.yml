@@ -15,7 +15,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         include:
           - os: ubuntu-latest
-            binary_name: aicli-linux-amd64
+            binary_name: aicli-linux-arm64
           - os: macos-latest
             binary_name: aicli-darwin-amd64
 
