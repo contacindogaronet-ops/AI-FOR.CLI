@@ -1,42 +1,36 @@
-name: Build AI CLI Binary
+name: Build KUL Engine
 
 on:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        include:
-          - os: ubuntu-latest
-            binary_name: aicli-linux-arm64
-          - os: macos-latest
-            binary_name: aicli-darwin-amd64
-
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          check-latest: true
 
-      - name: Tidy Dependencies
-        run: go mod tidy
-
-      - name: Build Binary
+      - name: Compile Optimized ARM64 Binary
+        env:
+          GOOS: linux
+          GOARCH: arm64
+          CGO_ENABLED: 0
         run: |
-          go build -ldflags="-s -w" -o ${{ matrix.binary_name }} main.go
+          go mod tidy
+          mkdir -p dist
+          # Strip debugging info (-s -w) agar biner ringan & eksekusi cepat
+          go build -trimpath -ldflags="-s -w" -o dist/kul-engine-arm64 .
 
-      - name: Upload Binary Artifacts
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: compiled-binaries-${{ matrix.os }}
-          path: ${{ matrix.binary_name }}
+          name: kul-engine-arm64
+          path: dist/kul-engine-arm64
