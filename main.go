@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
+	cli "aicli/internal/cli"
 	"aicli/internal/config"
 	"aicli/internal/core"
-	"aicli/internal/ui"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -24,5 +24,5 @@ func main() {
 	memory := core.LoadMemory()
 
 	// Masuk ke Interactive Menu
-	ui.RunInteractiveMenu(cfg, pool, memory)
+	cli.RunInteractiveMenu(cfg, pool, memory)
 }
