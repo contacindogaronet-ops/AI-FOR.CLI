@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 )
@@ -153,9 +154,14 @@ func AutoApplyFiles(aiResponse string) int {
 	}
 
 	if appliedCount > 0 {
-		fmt.Println("\n[AUTO-GIT] Menjalankan sinkronisasi git otomatis...")
-		RunSystemDiagnostics("git", "rebase", "--abort")
-		RunSystemDiagnostics("git", "merge", "--abort")
+		fmt.Println("\n[AUTO-GIT] Menjalankan sinkronisasi git otomatis & rilis tag...")
+
+		if _, err := os.Stat(".git/rebase-merge"); err == nil {
+			RunSystemDiagnostics("git", "rebase", "--abort")
+		}
+		if _, err := os.Stat(".git/MERGE_HEAD"); err == nil {
+			RunSystemDiagnostics("git", "merge", "--abort")
+		}
 
 		currentBranch := RunSystemDiagnostics("git", "branch", "--show-current")
 		if currentBranch == "" {
@@ -163,19 +169,22 @@ func AutoApplyFiles(aiResponse string) int {
 		}
 
 		RunSystemDiagnostics("git", "add", ".")
-		RunSystemDiagnostics("git", "commit", "-m", "fix: autonomous Termux AI patch")
+		RunSystemDiagnostics("git", "commit", "-m", "feat(core): autonomous AI patch & release trigger")
 		
+		tagName := fmt.Sprintf("v1.0.%d", time.Now().Unix()%1000)
+		RunSystemDiagnostics("git", "tag", "-a", tagName, "-m", "Automated Release by Termux AI Daemon")
+
 		pullOut := RunSystemDiagnostics("git", "pull", "--rebase", "origin", currentBranch)
 		if strings.Contains(pullOut, "CONFLICT") {
 			RunSystemDiagnostics("git", "add", ".")
 			RunSystemDiagnostics("git", "rebase", "--continue")
 		}
 
-		pushOut := RunSystemDiagnostics("git", "push", "-u", "origin", currentBranch, "--force-with-lease")
+		pushOut := RunSystemDiagnostics("git", "push", "-u", "origin", currentBranch, "--follow-tags", "--force-with-lease")
 		if strings.Contains(pushOut, "error") || strings.Contains(pushOut, "rejected") {
-			RunSystemDiagnostics("git", "push", "-u", "origin", currentBranch)
+			RunSystemDiagnostics("git", "push", "-u", "origin", currentBranch, "--follow-tags")
 		} else {
-			fmt.Println(" 🚀 [GIT PUSH BERHASIL DIPICU]")
+			fmt.Printf(" 🚀 [GIT PUSH & TAG %s BERHASIL DIPICU KE GITHUB]\n", tagName)
 		}
 	}
 
