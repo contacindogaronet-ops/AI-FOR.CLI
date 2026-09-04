@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/rs/zerolog/log"
 )
 
 type FileTarget struct {
@@ -15,15 +17,38 @@ type FileTarget struct {
 	Content  string
 }
 
-func RunSystemDiagnostics(command string) string {
-	cmd := exec.Command("bash", "-c", command)
+// ExpandTermuxEnv menggantikan tilde (~) dengan HOME dan $PREFIX jika diperlukan
+func ExpandTermuxEnv(path string) string {
+	homeDir := os.Getenv("HOME")
+	prefixDir := os.Getenv("PREFIX")
+
+	if strings.HasPrefix(path, "~/") {
+		path = filepath.Join(homeDir, path[2:])
+	} else if path == "~" {
+		path = homeDir
+	}
+
+	if strings.Contains(path, "$PREFIX") && prefixDir != "" {
+		path = strings.ReplaceAll(path, "$PREFIX", prefixDir)
+	}
+
+	return path
+}
+
+func RunSystemDiagnostics(name string, args ...string) string {
+	cmd := exec.Command(name, args...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
 	if err != nil {
-		return strings.TrimSpace(stderr.String())
+		errMsg := strings.TrimSpace(stderr.String())
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		log.Error().Str("cmd", name).Strs("args", args).Msg(errMsg)
+		return errMsg
 	}
 	return strings.TrimSpace(out.String())
 }
@@ -36,8 +61,10 @@ func ExtractCodeBlocks(aiResponse string) []FileTarget {
 
 	for _, m := range matches {
 		if len(m) >= 3 {
+			rawPath := strings.TrimSpace(m[1])
+			expandedPath := ExpandTermuxEnv(rawPath)
 			targets = append(targets, FileTarget{
-				FilePath: strings.TrimSpace(m[1]),
+				FilePath: expandedPath,
 				Content:  strings.TrimPrefix(m[2], "\n"),
 			})
 		}
@@ -45,7 +72,6 @@ func ExtractCodeBlocks(aiResponse string) []FileTarget {
 
 	reGenericBlock := regexp.MustCompile("(?s)```[a-zA-Z0-9_+-]*\\s*\n(.*?)```")
 	genericMatches := reGenericBlock.FindAllStringSubmatch(aiResponse, -1)
-
 	reCommentFile := regexp.MustCompile(`^(?://|#|/\*)\s*(?:File|Path):\s*([^\s\*]+)`)
 
 	for _, m := range genericMatches {
@@ -55,7 +81,8 @@ func ExtractCodeBlocks(aiResponse string) []FileTarget {
 			if len(lines) > 0 {
 				firstLine := strings.TrimSpace(lines[0])
 				if fileMatch := reCommentFile.FindStringSubmatch(firstLine); len(fileMatch) >= 2 {
-					filePath := strings.TrimSpace(fileMatch[1])
+					rawPath := strings.TrimSpace(fileMatch[1])
+					filePath := ExpandTermuxEnv(rawPath)
 
 					alreadyExtracted := false
 					for _, t := range targets {
@@ -79,6 +106,24 @@ func ExtractCodeBlocks(aiResponse string) []FileTarget {
 	return targets
 }
 
+// ParseIntentAndExecute mendeteksi awalan prompt untuk menentukan mode aksi daemon
+func ParseIntentAndExecute(prompt string) (string, string) {
+	trimmed := strings.TrimSpace(prompt)
+
+	if strings.HasPrefix(strings.ToUpper(trimmed), "FIX IT") {
+		cleanPrompt := strings.TrimSpace(trimmed[6:])
+		return "FIX", cleanPrompt
+	} else if strings.HasPrefix(strings.ToUpper(trimmed), "PEMBAHASAN") {
+		cleanPrompt := strings.TrimSpace(trimmed[10:])
+		return "DISCUSSION", cleanPrompt
+	} else if strings.HasPrefix(strings.ToUpper(trimmed), "EXEC") {
+		cleanPrompt := strings.TrimSpace(trimmed[4:])
+		return "DIRECT_EXEC", cleanPrompt
+	}
+
+	return "DEFAULT", prompt
+}
+
 func AutoApplyFiles(aiResponse string) int {
 	targets := ExtractCodeBlocks(aiResponse)
 	if len(targets) == 0 {
@@ -86,76 +131,51 @@ func AutoApplyFiles(aiResponse string) int {
 	}
 
 	appliedCount := 0
-	fmt.Println("\n[AUTO-EXECUTOR] Menganalisis kode & direktori dari AI...")
+	fmt.Println("\n[AUTO-EXECUTOR] Menganalisis direktori (~ / $PREFIX) & menulis file...")
 
 	for _, t := range targets {
 		dir := filepath.Dir(t.FilePath)
 		if dir != "." && dir != "" {
 			if err := os.MkdirAll(dir, 0755); err != nil {
-				fmt.Printf(" ❌ Gagal membuat folder [%s]: %v\n", dir, err)
+				log.Error().Err(err).Str("dir", dir).Msg("Gagal membuat folder direktori")
 				continue
 			}
 		}
 
 		err := os.WriteFile(t.FilePath, []byte(t.Content), 0644)
 		if err != nil {
-			fmt.Printf(" ❌ Gagal menulis file [%s]: %v\n", t.FilePath, err)
+			log.Error().Err(err).Str("file", t.FilePath).Msg("Gagal menulis file")
 			continue
 		}
 
-		fmt.Printf(" 🚀 [SUKSES TERBUAT/TERPERBARUI] -> %s\n", t.FilePath)
+		fmt.Printf(" 🚀 [TERBUAT/TERPERBARUI] -> %s\n", t.FilePath)
 		appliedCount++
 	}
 
-	// Otomatis jalankan git pipeline dengan penanganan konflik cerdas
 	if appliedCount > 0 {
 		fmt.Println("\n[AUTO-GIT] Menjalankan sinkronisasi git otomatis...")
-		
-		// 1. Bersihkan sisa rebase / merge yang macet sebelumnya
-		RunSystemDiagnostics("git rebase --abort")
-		RunSystemDiagnostics("git merge --abort")
-		RunSystemDiagnostics("rm -rf .git/rebase-merge .git/rebase-apply")
+		RunSystemDiagnostics("git", "rebase", "--abort")
+		RunSystemDiagnostics("git", "merge", "--abort")
 
-		// 2. Deteksi branch aktif secara dinamis
-		currentBranch := RunSystemDiagnostics("git branch --show-current")
+		currentBranch := RunSystemDiagnostics("git", "branch", "--show-current")
 		if currentBranch == "" {
 			currentBranch = "master"
 		}
-		fmt.Printf("[AUTO-GIT] Menggunakan branch aktif: %s\n", currentBranch)
 
-		// 3. Add perubahan file hasil patch AI
-		if out := RunSystemDiagnostics("git add ."); out != "" {
-			fmt.Println("Git Add:", out)
+		RunSystemDiagnostics("git", "add", ".")
+		RunSystemDiagnostics("git", "commit", "-m", "fix: autonomous Termux AI patch")
+		
+		pullOut := RunSystemDiagnostics("git", "pull", "--rebase", "origin", currentBranch)
+		if strings.Contains(pullOut, "CONFLICT") {
+			RunSystemDiagnostics("git", "add", ".")
+			RunSystemDiagnostics("git", "rebase", "--continue")
 		}
 
-		// 4. Commit perubahan lokal
-		commitMsg := "fix: autonomous AI patch update"
-		if out := RunSystemDiagnostics(fmt.Sprintf("git commit -m \"%s\"", commitMsg)); out != "" {
-			fmt.Println("Git Commit:", out)
-		}
-
-		// 5. Tarik update dari remote dengan strategi 'ours' (jika ada konflik file workflow,utamakan patch AI terbaru)
-		fmt.Printf("[AUTO-GIT] Sinkronisasi remote (git pull --rebase origin %s)...\n", currentBranch)
-		pullOut := RunSystemDiagnostics(fmt.Sprintf("git pull --rebase origin %s", currentBranch))
-		if pullOut != "" {
-			fmt.Println("Git Pull Rebase Info:", pullOut)
-			// Jika terjadi konflik saat rebase, selesaikan otomatis dengan menerima file patch lokal terbaru
-			if strings.Contains(pullOut, "CONFLICT") || strings.Contains(pullOut, "could not apply") {
-				fmt.Println("[AUTO-GIT] Terdeteksi konflik, menyamakan status dengan patch lokal...")
-				RunSystemDiagnostics("git add .")
-				RunSystemDiagnostics("git rebase --continue")
-			}
-		}
-
-		// 6. Push paksa yang aman (force-with-lease) agar skrip daemon tidak pernah stuck di terminal
-		fmt.Printf("[AUTO-GIT] Melakukan push ke origin/%s...\n", currentBranch)
-		pushOut := RunSystemDiagnostics(fmt.Sprintf("git push -u origin %s --force-with-lease", currentBranch))
-		if pushOut != "" && strings.Contains(pushOut, "error") {
-			fmt.Println("Git Push Error:", pushOut)
-			// Fallback darurat jika lease gagal: lakukan push standar
-			RunSystemDiagnostics(fmt.Sprintf("git push -u origin %s", currentBranch))
+		pushOut := RunSystemDiagnostics("git", "push", "-u", "origin", currentBranch, "--force-with-lease")
+		if strings.Contains(pushOut, "error") || strings.Contains(pushOut, "rejected") {
+			RunSystemDiagnostics("git", "push", "-u", "origin", currentBranch)
 		} else {
-			fmt.Println(" 🚀 [GIT PUSH & GITHUB ACTIONS BERHASIL DIPICU]")
+			fmt.Println(" 🚀 [GIT PUSH BERHASIL DIPICU]")
 		}
 	}
 
